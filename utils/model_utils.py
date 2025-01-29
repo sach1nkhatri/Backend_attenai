@@ -32,17 +32,22 @@ def get_images_and_labels(path):
     return faces, ids
 
 def train_recognizer():
-    """Train the face recognition model."""
+    """Train the face recognition model with optimized parameters."""
     recognizer = cv2.face.LBPHFaceRecognizer_create()
+
+    # ✅ Use more neighbors and a lower confidence threshold
+    recognizer.setThreshold(50)  
+
     faces, ids = get_images_and_labels("TrainingImage")
 
     if not faces or not ids:
-        print("❌ No valid training images found. Make sure images are saved correctly.")
+        print("❌ No valid training images found.")
         return
 
     recognizer.train(faces, np.array(ids))
     recognizer.save(MODEL_PATH)
     print(f"✅ Model trained and saved at {MODEL_PATH}")
+
 
 def load_recognizer():
     """Load the trained recognizer."""

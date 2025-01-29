@@ -3,13 +3,16 @@ import numpy as np
 import base64
 import os
 from .file_utils import get_haarcascade_path
+import time
+
+last_blink_time = {}
 
 # Load the face detection model
 detector = cv2.CascadeClassifier(get_haarcascade_path())
 
 
-def crop_and_save_faces(user_id, name, images, max_faces=50):
-    """Crop faces from images, enhance them, and save for training."""
+def crop_and_save_faces(user_id, name, images, max_faces=100):
+    """Crop faces, apply histogram equalization, and save for training."""
     TRAINING_DIR = "TrainingImage"
     os.makedirs(TRAINING_DIR, exist_ok=True)
 
@@ -19,36 +22,37 @@ def crop_and_save_faces(user_id, name, images, max_faces=50):
             break
 
         try:
-            # ✅ Decode base64 image
-            img_data = base64.b64decode(img_data.split(",")[1])  
+            img_data = base64.b64decode(img_data.split(",")[1])
             img_path = f"{TRAINING_DIR}/{name}_{user_id}_{idx + 1}.jpg"
 
             with open(img_path, "wb") as f:
                 f.write(img_data)
 
-            # ✅ Read the saved image
             img = cv2.imread(img_path)
             if img is None:
-                print(f"❌ Error: Could not read {img_path}")
                 continue
 
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=6, minSize=(50, 50))
+
+            # ✅ Apply histogram equalization
+            equalized = cv2.equalizeHist(gray)
+
+            faces = detector.detectMultiScale(equalized, scaleFactor=1.05, minNeighbors=5, minSize=(50, 50))
 
             if len(faces) == 0:
-                print(f"❌ No face detected in {img_path}. Skipping...")
                 continue
 
-            # ✅ Crop, enhance, and save faces
             for (x, y, w, h) in faces:
-                cropped_face = gray[y:y+h, x:x+w]
-                resized_face = cv2.resize(cropped_face, (300, 300))  # ✅ Normalize size for training
-                cv2.imwrite(img_path, resized_face)  # ✅ Save cropped face
+                face = equalized[y:y+h, x:x+w]
+
+                # ✅ Save improved images
+                resized_face = cv2.resize(face, (300, 300))
+                cv2.imwrite(img_path, resized_face)
+
                 saved_count += 1
-                print(f"✅ Saved face {saved_count} to {img_path}")
 
                 if saved_count >= max_faces:
-                    break  # Stop capturing once limit is reached
+                    break
 
         except Exception as e:
             print(f"❌ Error processing image {idx + 1}: {e}")
@@ -57,39 +61,61 @@ def crop_and_save_faces(user_id, name, images, max_faces=50):
 
 
 
-def draw_faces(frame):
-    """Detect faces and draw bounding boxes."""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = detector.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5)
-
-    for (x, y, w, h) in faces:
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-    return frame
 
 
 def detect_faces(frame, recognizer):
-    """Detect and recognize faces in an image frame."""
-    if not isinstance(frame, np.ndarray):  # Ensure valid input
+    """Detect and recognize faces with dynamic confidence adjustment."""
+    if not isinstance(frame, np.ndarray):
         print("❌ Invalid frame format in detect_faces")
-        return []
+        return [], frame
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     faces = detector.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=6, minSize=(50, 50)  # 🔧 Adjusted parameters
+        gray, scaleFactor=1.05, minNeighbors=5, minSize=(40, 40), maxSize=(400, 400)
     )
 
     recognized_users = []
     for (x, y, w, h) in faces:
-        id, conf = recognizer.predict(gray[y:y+h, x:x+w])
+        face = gray[y:y+h, x:x+w]
+        face = cv2.resize(face, (300, 300))
 
-        # ✅ Lowering confidence threshold for better accuracy
-        if conf < 65:  # 🔧 Previously 45, now allowing slightly higher confidence
+        try:
+            id, conf = recognizer.predict(face)
+
+            # ✅ Adjust confidence threshold dynamically
+            distance_factor = 1 - (w / frame.shape[1])  # Approximate distance factor
+            threshold = 60 + (distance_factor * 20)  # Higher confidence needed for distant faces
+
+            if conf > threshold:
+                print(f"❌ Confidence too high ({conf}), skipping.")
+                continue
+
             recognized_users.append({"uid": str(id), "confidence": round(conf, 2)})
-        else:
-            recognized_users.append({"uid": "Unknown", "confidence": round(conf, 2)})
 
-    return recognized_users
+            # ✅ Draw bounding box with color based on confidence
+            color = (0, 255, 0) if conf < threshold else (0, 0, 255)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+            cv2.putText(frame, f"ID: {id} ({conf:.2f})", (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        except Exception as e:
+            print(f"❌ Error recognizing face: {e}")
+
+    return recognized_users, frame
+
+
+
+
+
+def draw_faces(frame):
+    """Detect faces and draw bounding boxes."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = detector.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=5, minSize=(40, 40))
+
+    for (x, y, w, h) in faces:
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)  # Draw green box
+
+    return frame
 
 
