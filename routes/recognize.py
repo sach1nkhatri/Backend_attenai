@@ -87,6 +87,7 @@ def is_within_schedule(uid):
 
 
 @recognize_bp.route('', methods=['POST'])
+@recognize_bp.route('', methods=['POST'])
 def recognize_user():
     """Recognize multiple faces and mark attendance ONLY if today is a scheduled weekday."""
     try:
@@ -108,24 +109,72 @@ def recognize_user():
         attendance_marked = []
 
         now = get_current_time()
-        cooldown_time = timedelta(minutes=10)  # ✅ Set cooldown to 10 minutes
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+        # ✅ Track already marked users to avoid duplicate attendance
+        marked_users = set()
 
         for user in recognized_users:
             uid = user["uid"]
             confidence = user["confidence"]
 
-            if confidence > 1000:
-                continue  # ✅ Skip if confidence is too high (bad recognition)
+            # ✅ Skip unknown users
+            if confidence > 1000 or uid == "Unknown":
+                print(f"❌ Skipping unknown user with UID: {uid}")
+                continue  
 
             # ✅ Check if user has a valid schedule for today
             module_name = is_within_schedule(uid)
             if not module_name:
                 print(f"❌ Attendance rejected for {uid}. No valid schedule found.")
-                continue  # ✅ Skip recording attendance if today is not scheduled
-
-            now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+                continue  
 
             print(f"📌 Marking attendance for {uid} in module {module_name} at {now_str}")
+
+            # ✅ Retrieve name from `schedules.students`
+            try:
+                schedule_ref = db.collection("schedules").stream()  # Fetch all schedules
+                user_name = "Unknown"
+
+                for schedule in schedule_ref:
+                    schedule_data = schedule.to_dict()
+                    
+                    # ✅ Iterate over students array and extract name manually
+                    for student in schedule_data.get("students", []):
+                        if isinstance(student, dict) and student.get("uid") == uid:
+                            user_name = student.get("name", "Unknown")
+                            print(f"✅ Found Name for UID {uid}: {user_name}")
+                            break  # ✅ Exit loop once name is found
+
+                print(f"🆔 Final Retrieved Name: {user_name}")
+
+                attendance_ref = db.collection("AttendanceRecords")
+
+                # ✅ Check if user has already been marked
+                existing_attendance = attendance_ref.where("uid", "==", uid).where("module", "==", module_name).stream()
+                already_marked = any(existing_attendance)
+
+                if already_marked:
+                    print(f"✅ {uid} already marked present. Skipping duplicate entry.")
+                    continue  
+
+                # ✅ Mark user as "Present"
+                print(f"📝 Creating attendance record for {uid} in {module_name}")
+
+                new_record = {
+                    "uid": uid,
+                    "module": module_name,
+                    "name": user_name,
+                    "status": "Present",
+                    "timeRecorded": now_str
+                }
+
+                attendance_ref.add(new_record)
+                marked_users.add(uid)
+                print(f"✅ Attendance recorded in Firestore for {uid}: {new_record}")
+
+            except Exception as e:
+                print(f"❌ Error retrieving student name from Firestore for {uid}: {e}")
 
             attendance_marked.append({"uid": uid, "module": module_name, "time": now_str})
 
@@ -134,3 +183,7 @@ def recognize_user():
     except Exception as e:
         print("❌ Error in recognize_user:", str(e))
         return jsonify({"message": "Internal Server Error", "error": str(e)}), 500
+
+
+
+
