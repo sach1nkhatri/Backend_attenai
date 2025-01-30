@@ -8,3 +8,5 @@ node_modules/
 
 # General
 .DS_Store
+
+config/firebase_key.json/
