@@ -1,6 +1,8 @@
 from flask import Blueprint, jsonify, request
 import base64
 import cv2
+import csv
+import os
 import numpy as np
 from utils.image_utils import detect_faces
 from utils.model_utils import load_recognizer
@@ -10,8 +12,17 @@ import pytz
 
 recognize_bp = Blueprint('recognize', __name__, url_prefix="/recognize")
 
-# ✅ Store recently marked users to prevent duplicate detections
-recent_attendance = {}
+
+
+ATTENDANCE_CSV = "Attendance.csv"  # File path for attendance records
+
+# ✅ Ensure CSV file exists with headers before using it
+if not os.path.exists(ATTENDANCE_CSV):
+    with open(ATTENDANCE_CSV, "w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["uid", "name", "module", "status", "timeRecorded"])  # ✅ Add CSV headers
+    print("✅ Created Attendance.csv with headers.")
+
 
 def decode_image(image_data):
     """Convert base64-encoded image to OpenCV format."""
@@ -87,12 +98,13 @@ def is_within_schedule(uid):
 
 
 
+
 @recognize_bp.route('', methods=['POST'])
 def recognize_user():
-    """Recognize multiple faces and mark attendance ONLY if today is a scheduled weekday."""
+    """Recognize faces, log attendance in CSV, and then store in Firestore."""
     try:
         print("📥 Received request for face recognition.")
-        
+
         data = request.json
         image_data = data.get("image")
 
@@ -118,11 +130,18 @@ def recognize_user():
             return jsonify({"message": "No recognizable faces detected"}), 200
 
         attendance_marked = []
-        now = get_current_time()
-        today_str = now.strftime("%Y-%m-%d")  # ✅ Extract today's date
-        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        today_date = now.strftime("%Y-%m-%d")  # ✅ Extract only today's date
 
-        marked_users = set()
+        # ✅ Step 1: Load existing attendance records into memory (Prevents multiple file reads)
+        existing_attendance = set()
+        with open(ATTENDANCE_CSV, "r", newline="") as file:
+            reader = csv.reader(file)
+            next(reader, None)  # ✅ Skip the header row
+            for row in reader:
+                if len(row) >= 5:
+                    existing_attendance.add((row[0], row[2], row[4][:10]))  # (uid, module, date)
 
         for user in recognized_users:
             uid = user["uid"]
@@ -141,59 +160,59 @@ def recognize_user():
                 print(f"❌ Attendance rejected for UID {uid}. No valid schedule found.")
                 continue  
 
-            print(f"✅ Attendance approved for UID {uid} in module {module_name} at {now_str}")
+            # ✅ Step 2: Check if user is already marked present in CSV
+            if (uid, module_name, today_date) in existing_attendance:
+                print(f"✅ {uid} already marked present today in module {module_name}. Skipping duplicate entry.")
+                continue  # ❌ Skip writing duplicate entry
 
-            # ✅ Retrieve name from `schedules.students`
+            # ✅ Step 3: Retrieve user name (🔥 FIXED)
+            user_name = "Unknown"
+            schedule_ref = db.collection("schedules").get()  # ✅ Get all schedules
+
+            for schedule in schedule_ref:
+                schedule_data = schedule.to_dict()
+                for student in schedule_data.get("students", []):
+                    if isinstance(student, dict) and student.get("uid") == uid:
+                        user_name = student.get("name", "Unknown")
+                        print(f"✅ Found Name for UID {uid}: {user_name}")  # Debugging Log
+                        break  # Stop searching after finding the user
+
+            # ✅ Step 4: Log attendance in CSV
+            with open(ATTENDANCE_CSV, "a", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow([uid, user_name, module_name, "Present", today_str])
+
+            print(f"✅ Attendance recorded successfully for UID {uid} in module {module_name} at {today_str}")
+
+            # ✅ Step 5: Store attendance in Firestore
             try:
-                schedule_ref = db.collection("schedules").stream()
-                user_name = "Unknown"
-
-                for schedule in schedule_ref:
-                    schedule_data = schedule.to_dict()
-
-                    for student in schedule_data.get("students", []):
-                        if isinstance(student, dict) and student.get("uid") == uid:
-                            user_name = student.get("name", "Unknown")
-                            break  
-
                 attendance_ref = db.collection("AttendanceRecords")
-
-                # ✅ Check if user has already been marked **for today**
-                existing_attendance = attendance_ref.where("uid", "==", uid).where("module", "==", module_name).where("timeRecorded", ">=", today_str).limit(1).stream()
-                
-                already_marked = any(existing_attendance)
-
-                if already_marked:
-                    print(f"✅ {uid} already marked present today. Skipping duplicate entry.")
-                    continue  
-
-                # ✅ Mark user as "Present"
-                print(f"📝 Creating attendance record for UID {uid} in module {module_name}")
 
                 new_record = {
                     "uid": uid,
                     "module": module_name,
                     "name": user_name,
                     "status": "Present",
-                    "timeRecorded": now_str
+                    "timeRecorded": now  # ✅ Store as Firestore timestamp
                 }
 
-                attendance_ref.add(new_record)
-                marked_users.add(uid)
-                print(f"✅ Attendance recorded successfully for UID {uid}: {new_record}")
+                attendance_ref.add(new_record)  # ✅ Save to Firestore
+                print(f"✅ Attendance successfully saved in Firestore for UID {uid}")
 
             except Exception as e:
-                print(f"❌ Error retrieving student name from Firestore for UID {uid}: {e}")
+                print(f"❌ Firestore Error for UID {uid}: {e}")
 
-            attendance_marked.append({"uid": uid, "module": module_name, "time": now_str})
+            attendance_marked.append({"uid": uid, "module": module_name, "time": today_str})
 
         print("✅ Recognition process completed successfully.")
+
+        if not attendance_marked:
+            return jsonify({"message": "No attendance marked", "recognized_users": recognized_users}), 200
+
         return jsonify({"recognized_users": recognized_users, "attendance_marked": attendance_marked})
 
     except Exception as e:
         print(f"❌ ERROR in recognize_user: {str(e)}")
         return jsonify({"message": "Internal Server Error", "error": str(e)}), 500
-
-
 
 
