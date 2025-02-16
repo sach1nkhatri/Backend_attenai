@@ -3,27 +3,33 @@ import numpy as np
 import base64
 import os
 from .file_utils import get_haarcascade_path
-import time
-
-last_blink_time = {}
 
 # Load the face detection model
 detector = cv2.CascadeClassifier(get_haarcascade_path())
 
+# Directory for storing training images
+TRAINING_DIR = "TrainingImage"
 
-def crop_and_save_faces(user_id, name, images, max_faces=100):
-    """Crop faces, apply histogram equalization, and save for training."""
-    TRAINING_DIR = "TrainingImage"
+def crop_and_save_faces(user_id, name, images, max_faces=100, retrain=False):
+    """
+    Crop faces, apply histogram equalization, and save for training.
+    If retraining, appends new images instead of replacing old ones.
+    """
     os.makedirs(TRAINING_DIR, exist_ok=True)
+    user_folder = os.path.join(TRAINING_DIR, user_id)
+    os.makedirs(user_folder, exist_ok=True)
 
-    saved_count = 0
+    # ✅ Check existing images count
+    existing_images = len(os.listdir(user_folder)) if os.path.exists(user_folder) else 0
+    saved_count = existing_images if retrain else 0  # If retraining, start from existing count
+
     for idx, img_data in enumerate(images):
         if saved_count >= max_faces:
             break
 
         try:
             img_data = base64.b64decode(img_data.split(",")[1])
-            img_path = f"{TRAINING_DIR}/{name}_{user_id}_{idx + 1}.jpg"
+            img_path = os.path.join(user_folder, f"{user_id}_{saved_count + 1}.jpg")
 
             with open(img_path, "wb") as f:
                 f.write(img_data)
@@ -60,11 +66,10 @@ def crop_and_save_faces(user_id, name, images, max_faces=100):
     return saved_count
 
 
-
-
-
 def detect_faces(frame, recognizer):
-    """Detect and recognize faces with dynamic confidence adjustment."""
+    """
+    Detect and recognize faces with dynamic confidence adjustment.
+    """
     if not isinstance(frame, np.ndarray):
         print("❌ Invalid frame format in detect_faces")
         return [], frame
@@ -105,11 +110,10 @@ def detect_faces(frame, recognizer):
     return recognized_users, frame
 
 
-
-
-
 def draw_faces(frame):
-    """Detect faces and draw bounding boxes."""
+    """
+    Detect faces and draw bounding boxes.
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     faces = detector.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=5, minSize=(40, 40))
 
@@ -117,5 +121,3 @@ def draw_faces(frame):
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)  # Draw green box
 
     return frame
-
-

@@ -8,3 +8,4 @@ def register_routes(app):
     app.register_blueprint(register_bp, url_prefix="/register")  # Ensure this is registered
     app.register_blueprint(recognize_bp, url_prefix="/recognize")
 
+
